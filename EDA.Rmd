@@ -1,0 +1,574 @@
+---
+title: "Heart Disease Survival"
+author: "Ada Lazuli"
+date: '2022-07-17'
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: '2'
+  html_document:
+    toc: yes
+    toc_depth: 2
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+library(ggplot2)
+library(neuralnet)
+library(tidymodels)
+library(ROCR)
+library(DT) # Does not work with PDF Rendering
+set.seed(101011)
+```
+
+# Helper Functions
+
+This section details helper functions for use in data analysis
+
+```{r}
+find_outliers <- function(data) {
+  upper_limit <- mean(data) + 3 * sd(data)
+  lower_limit <- mean(data) - 3 * sd(data)
+  
+  mask <- (data > upper_limit)  | (data < lower_limit)
+  
+  return (data[mask])
+}
+
+generate_dstat_histogram <- function(df, col, title, x){
+  ggplot(df, aes(x = col, fill = DSTAT)) +
+    geom_histogram(alpha = 0.2)  +
+    labs(title=title, x = x, y = "Occurrences")
+  
+}
+
+generate_dstat_boxplot <- function(df, col, title, x){
+  ggplot(df, aes(x = col, fill = DSTAT)) +
+    geom_boxplot(alpha = 0.2) + coord_flip() +
+    labs(title=title, x = x, y = "Occurrences")
+  
+}
+
+generate_dstat_barchart_facet <- function(df, col, title, x){
+  ggplot(df, aes(x = col, fill = DSTAT)) +
+    geom_bar(position = position_dodge(), alpha = 0.2)  + 
+    labs(title=title, x = x, y = "Occurrences")
+}
+
+
+```
+
+
+# Data Loading
+
+This project uses the _Heart Disease Survival_ dataset compiles by Hosmer and Lemeshow (1998).
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+df <- read.csv("whas1.csv")
+str(df)
+```
+
+The data consists of `r nrow(df)` rows and `r ncol(df)` columns. 
+
+# Data Exploration
+
+This section explores each variable and reviews how the variable interacts with the response variable, `DSTAT` . However, prior to this, `DSTAT` is reviewed first.
+
+## DSTAT - Discharge Status
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+df$DSTAT <- factor(df$DSTAT, labels = c("Alive", "Dead"))
+table(df$DSTAT)
+```
+
+## ID
+
+The ID variable is a unique ID given to each row. Since the variable does not add value, it was removed from the dataset.
+
+```{r}
+df$ID <- NULL
+```
+
+## Age
+
+The AGE variable details the age, in years, of the patient.
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+summary(df$AGE)
+
+generate_dstat_histogram(df, col = df$AGE, title = "Histogram of Age, by DSTAT", x = "Age")
+generate_dstat_boxplot(df, col = df$AGE, title = "Boxplot of Age, by DSTAT", x = "Age")
+```
+
+The age variable was found to have `r length(find_outliers(df$AGE))` outliers, consisting of `r find_outliers(df$AGE)`
+
+It appears that the `AGE` variable has  Right skew when `DSTAT` is _alive_ and a left skew when `DSTAT` is _dead_.
+
+Additionally, the box plot shows that the inter quartile range (IQR) overlaps a bit when separated by `DSTAT`. 
+
+## Sex
+
+The SEX variable details the sex of the patient during intake. 
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+df$SEX <- factor(df$SEX, labels = c("Male", "Female"))
+print(table(df$SEX))
+generate_dstat_barchart_facet(df, col =  df$SEX, title = "Comparison of Sex by DSTAT", x = "Sex")
+```
+
+It is worth observing that `r sum(df$SEX == 'Male') / nrow(df) * 100` % of the observations in the data are male while, the remaining `r sum(df$SEX == 'Female') / nrow(df) * 100` % are female. 
+
+```{r}
+alive <- df[df$DSTAT == 'Alive',]
+dead <- df[df$DSTAT == 'Dead',]
+dead_female <- sum(dead$SEX == 'Female')
+total_female <- sum(df$SEX == 'Female')
+dead_male <- sum(dead$SEX == 'Male')
+total_male <- sum(df$SEX == 'Male')
+```
+Notably, there is an unbalanced ratio of male and female patients. It appears that `r dead_male/total_male * 100` % of the males were deceased at discharge while `r dead_female / total_female * 100 ` % of the females were deceased at discharge. Females were almost twice as likely to be deceased at discharge than males.
+
+```{r}
+test <- chisq.test(df$DSTAT, df$SEX)
+print(test)
+```
+
+Given that the chi squared test had a p-value of `r test$p.value` and using an alpha of 0.01, there appears to be __evidence__ to refute the hypothesis that `DSTAT` and `SEX` are independent.
+
+## CPK - Peak Cardiac Enzyme
+
+The CPK variable details the peak cardiac enzyme.
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+summary(df$CPK)
+generate_dstat_histogram(df, col = df$CPK, title = "Histogram of Peak Cardiac Enzyme", x = "Peak Cardiac Enzyme")
+generate_dstat_boxplot(df, col = df$CPK, title = "Boxplot of Peak Cardiac Enzyme", x = "Peak Cardiac Enzyme")
+```
+
+The CPK variable was found to have `r length(find_outliers(df$CPK))` outliers, consisting of `r find_outliers(df$CPK)`
+
+From the histogram, its apparent that CPK has a strong right skew, regardless of whether `DSTAT`. Additionally, the boxplot shows that, when split by `DSTAT`, CPK with death has twice the IQR compared to CPK with alive patients.
+
+## SHO - Cardiogenic Shock Complications
+
+The SHO variable details the cardiogenic shock complications of the patient during intake. 
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+df$SHO <- factor(df$SHO, labels = c("No", "Yes"))
+print(table(df$SHO))
+generate_dstat_barchart_facet(df, col =  df$SHO, title = "Cardiogenic Shock Complications by DSTAT", x = "Cardiogenic Shock Complication")
+```
+
+It is worth observing that `r sum(df$SHO == 'Yes') / nrow(df) * 100` % of the observations in the data are associated with cardiogenic shock while, the remaining `r sum(df$SHO == 'No') / nrow(df) * 100` % is not. 
+
+```{r}
+alive <- df[df$DSTAT == 'Alive',]
+dead <- df[df$DSTAT == 'Dead',]
+dead_no <- sum(dead$SHO == 'No')
+total_no <- sum(df$SHO == 'No')
+dead_yes <- sum(dead$SHO == 'Yes')
+total_yes <- sum(df$SHO == 'Yes')
+```
+
+The cardiogenic shock variable was observed to be unbalanced and, upon initial inspection, it appears that having a cardiogenic shock complication makes a deceased discharge much more likely. 
+
+`r dead_no / total_no *100` % of Non cardiogenic shock patients died, while `r dead_yes / total_yes * 100` % of cardiogenic shock patients did die. 
+
+```{r}
+test <- chisq.test(df$DSTAT, df$SHO)
+print(test)
+```
+
+Given that the chi squared test had a p-value of `r test$p.value` and using an alpha of 0.01, there appears to be __evidence__ to refute the hypothesis that `DSTAT` and `SHO` are independent, which is expected.
+
+
+## CHF - Left Heart Failure Complications
+
+The CHF variable details the left heart failure complications of the patient.
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+df$CHF <- factor(df$CHF, labels = c("No", "Yes"))
+print(table(df$CHF))
+generate_dstat_barchart_facet(df, col =  df$CHF, title = "Left Heart Failure Complications by DSTAT", x = "Left Heart Failure Complication")
+```
+
+It is worth observing that `r sum(df$CHF == 'Yes') / nrow(df) * 100` % of the observations in the data are associated with left heart failure while, the remaining `r sum(df$CHF == 'No') / nrow(df) * 100` % is not. 
+
+```{r}
+alive <- df[df$DSTAT == 'Alive',]
+dead <- df[df$DSTAT == 'Dead',]
+dead_no <- sum(dead$CHF == 'No')
+total_no <- sum(df$CHF == 'No')
+dead_yes <- sum(dead$CHF == 'Yes')
+total_yes <- sum(df$CHF == 'Yes')
+```
+
+The left heart failure variable was observed to be unbalanced and, upon initial inspection, it appears that having left heart failure makes a deceased discharge sightly more likely. 
+
+`r dead_no / total_no *100` % of the patients without left heart failure died, while `r dead_yes / total_yes * 100` % of the patients with left heart failure did die. 
+
+```{r}
+test <- chisq.test(df$DSTAT, df$CHF)
+print(test)
+```
+
+Given that the chi squared test had a p-value of `r test$p.value` and using an alpha of 0.01, there appears to be __evidence__ to refute the hypothesis that `DSTAT` and `CHF` are independent.
+
+
+## MIORD - MI Order
+
+The MIORD variable details whether the mycardial infarction is a first event or recurrent.
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+df$MIORD <- factor(df$MIORD, labels = c("First", "Recurrent"))
+print(table(df$MIORD))
+generate_dstat_barchart_facet(df, col =  df$MIORD, title = "Mycardial Infarction Order by DSTAT", x = "MI ORDER")
+```
+
+`r sum(df$MIORD == 'First') / nrow(df) * 100` % of the observations in the data are associated with a _first_ mycardial infarction while, the remaining `r sum(df$MIORD == 'Recurrent') / nrow(df) * 100` % have a recurrent mycardial infarction 
+
+```{r}
+alive <- df[df$DSTAT == 'Alive',]
+dead <- df[df$DSTAT == 'Dead',]
+dead_rec <- sum(dead$MIORD == 'Recurrent')
+total_rec <- sum(df$MIORD == 'Recurrent')
+dead_first <- sum(dead$MIORD == 'First')
+total_first <- sum(df$MIORD == 'First')
+```
+
+
+`r dead_rec / total_rec *100` % of the patients with their first mycardial infarction died, while `r dead_first / total_first * 100` % of the patients with recurrent mycardial infarctions died.
+
+```{r}
+test <- chisq.test(df$DSTAT, df$MIORD)
+print(test)
+```
+
+Given that the chi squared test had a p-value of `r test$p.value` and using an alpha of 0.01, there appears to be a __lack of evidence__ to refute the hypothesis that `DSTAT` and `MIORD` are independent. Due to this independence, the variable will be dropped.
+
+```{r}
+df$MIORD <- NULL
+```
+
+## MITYPE - MI Type
+
+The MITYPE variable details whether the mycardial infraction is:
+
+1. Q-Wave
+2. Non Q-Wave
+3. Indeterminate
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+df$MITYPE <- factor(df$MITYPE, labels = c("Q-Wave", "Non Q-Wave", "Indeterminate"))
+print(table(df$MITYPE))
+generate_dstat_barchart_facet(df, col =  df$MITYPE, title = "Mycardial Infarction by DSTAT", x = "MI TYPE")
+```
+
+The categories of the variable are not uniformly distributed in the data. The split of the categories is:
+
+1. Q-wave - `r sum(df$MITYPE == 'Q-Wave') / nrow(df) * 100` %
+2. Non Q-Wave - `r sum(df$MITYPE == 'Non Q-Wave') / nrow(df) * 100` %
+3. Indeterminate - `r sum(df$MITYPE == 'Indeterminate') / nrow(df) * 100` %
+
+```{r}
+alive <- df[df$DSTAT == 'Alive',]
+dead <- df[df$DSTAT == 'Dead',]
+dead_q <- sum(dead$MITYPE == 'Q-Wave')
+total_q <- sum(df$MITYPE == 'Q-Wave')
+dead_nq <- sum(dead$MITYPE == 'Non Q-Wave')
+total_nq <- sum(df$MITYPE == 'Non Q-Wave')
+dead_ind <- sum(dead$MITYPE == 'Indeterminate')
+total_ind <- sum(df$MITYPE == 'Indeterminate')
+```
+
+Next, looking at deceased discharge associations:
+
+1. Q-Wave - __`r dead_q / total_q *100`__ % of patients classified as Q-wave died.
+2. Non Q-Wave - __`r dead_nq / total_nq *100`__ % of patients classified as Non Q-wave died.
+3. Indeterminate - __`r dead_ind / total_ind *100`__ % of patients classified as Indeterminate died.
+
+```{r, warning=FALSE, collapse=TRUE}
+test <- chisq.test(df$DSTAT, df$MITYPE)
+print(test)
+```
+
+Given that the chi squared test had a p-value of `r test$p.value` and using an alpha of 0.01, there appears to be a __evidence__ to refute the hypothesis that `DSTAT` and `MITYPE` are independent.
+
+
+## Year
+
+The year variable details the year the data was collected. 
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+df$YEAR <- factor(df$YEAR, labels = c("1975", "1978", "1981", "1984", "1986", "1988"))
+print(table(df$YEAR))
+generate_dstat_barchart_facet(df, col =  df$YEAR, title = "Year of Collection by DSTAT", x = "Year")
+```
+
+There does not appear to be a significant difference between the years. Additionally, since the year does not provide any new information,  this variable will be removed.
+
+```{r}
+df$YEAR <- NULL
+```
+
+## YRGRP - Year Group
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+df$YRGRP <- factor(df$YRGRP, labels = c("1975 & 1978", "1981 & 1984", "1986 & 1988"))
+print(table(df$YRGRP))
+generate_dstat_barchart_facet(df, col =  df$YRGRP, title = "Grouped Cohort by DSTAT", x = "Year Group")
+```
+
+There does not appear to be a significant difference between the years. Additionally, since the year does not provide any new information,  this variable will be removed.
+
+```{r}
+df$YRGRP <- NULL
+```
+
+## LENSTAY - Length of Hospital Stay
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+summary(df$LENSTAY)
+generate_dstat_histogram(df, col = df$LENSTAY, title = "Histogram of Length of Stay by DSTAT", x = "Length of Stay")
+generate_dstat_boxplot(df, col = df$LENSTAY, title = "Boxplot of Length of Stay by DSTAT", x = "Length of Stay")
+```
+
+It is both intuitive and counter-intuitive that deceased at discharge is associated with a shorter hospital stay. However, given that the objective is to create a model to find the probability of deceased at discharge during intake and not during the stay, this variable will be removed.
+
+```{r}
+df$LENSTAY <- NULL
+```
+
+
+## LENFOL - Length of Follow Up
+
+The length of follow-up variable details the number of days before the next follow-up.
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+summary(df$LENFOL)
+generate_dstat_histogram(df, col = df$LENFOL, title = "Histogram of Length of Follow-Up by DSTAT", x = "Length of Follow-Up")
+generate_dstat_boxplot(df, col = df$LENFOL, title = "Boxplot of Length of Follow-Up by DSTAT", x = "Length of Follow-Up")
+```
+
+
+Given that this variable is post discharge, it is not useful for the objective and will be removed.
+
+```{r}
+df$LENFOL <- NULL
+```
+
+## FSTAT - Status at Follow Up
+
+The FSTAT is the status at follow up and details whether the patient was dead or alive.
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+df$FSTAT <- factor(df$FSTAT, labels = c("Alive", "Dead"))
+table(df$FSTAT)
+```
+
+Given that that follow-up is post discharge, this variable will be removed.
+
+```{r}
+df$FSTAT <- NULL
+```
+
+
+# Modeling
+
+The variable remaining in the data consists of `r names(df)`. Two of these variables are quantitative in nature will need to be preprocessed for modeling.
+
+## Train Test Split
+
+```{r}
+df <- read.csv("whas1.csv")
+df$ID <- NULL
+df$MIORD <- NULL
+df$YRGRP <- NULL
+df$YEAR <- NULL
+df$LENSTAY <- NULL
+df$LENFOL <- NULL
+df$FSTAT <- NULL
+data_partitioned <- initial_split(df, prop = 0.70, strata = DSTAT)
+train <- training(data_partitioned)
+test <-  testing(data_partitioned)
+```
+## Scaling
+
+The `AGE` and the `CPK` variable both need to be scaled. However, to prevent the training set from affecting the test set, the two are scaled separately.
+
+```{r}
+train$AGE <- scale(train$AGE)
+train$CPK <- scale(train$CPK)
+test$AGE <- scale(test$AGE)
+test$CPK <- scale(test$CPK)
+```
+
+## Model 1
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+model1 <- neuralnet(formula = DSTAT ~ ., data =train, hidden=3, err.fct="ce", linear.output = FALSE) 
+plot(model1, rep="best")
+```
+
+### Training Evaluation
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+model1_predictions<-neuralnet::compute(model1, model1$covariate)$net.result 
+# round to the classes
+model1_predictions<-apply(model1_predictions, c(1), round) 
+# Create the confusion matrix
+x <- table(model1_predictions, train$DSTAT, dnn =c("Predicted", "Actual")) 
+TP <- tryCatch({ TP <- x[1,1]}, error=function(cond){return(0)})
+TN <- tryCatch({ TN <- x[2,2]}, error=function(cond){return(0)})
+FP <- tryCatch({ FP <- x[1,2]}, error=function(cond){return(0)})
+FN <- tryCatch({ FN <- x[2,1]}, error=function(cond){return(0)})
+```
+
+|                          | Train Alive | Train Dead     |
+|         :----:           |  :----:    |   :----:       |
+| __Classified Alive__      |`r TP`      | `r FP`         |
+| __Classified Dead__      |`r FN`      | `r TN`         |
+
+The first model achieved an accuracy of __`r (TP + TN) / (TP + TN +FP +FN) * 100`%__ Against the training set. Additionally, the model exhibited a false positive rate of __`r FP/(FP + TN) * 100`__%.
+
+### Testing Evaluation
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+model1_predictions<-neuralnet::compute(model1, test[, -7])$net.result 
+# round to the classes
+model1_predictions<-apply(model1_predictions, c(1), round) 
+# Create the confusion matrix
+x <- table(model1_predictions, test$DSTAT, dnn =c("Predicted", "Actual")) 
+TP <- tryCatch({ TP <- x[1,1]}, error=function(cond){return(0)})
+TN <- tryCatch({ TN <- x[2,2]}, error=function(cond){return(0)})
+FP <- tryCatch({ FP <- x[1,2]}, error=function(cond){return(0)})
+FN <- tryCatch({ FN <- x[2,1]}, error=function(cond){return(0)})
+```
+
+|                          | Test Alive | Test Dead     |
+|         :----:           |  :----:    |   :----:       |
+| __Classified Alive__      |`r TP`      | `r FP`         |
+| __Classified Dead__      |`r FN`      | `r TN`         |
+
+The first model achieved an accuracy of __`r (TP + TN) / (TP + TN +FP +FN) * 100`%__ Against the testing set. Additionally, the model exhibited a false positive rate of __`r FP/(FP + TN) * 100`__%.
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+predictions = prediction(model1_predictions, test$DSTAT)
+plot(performance(predictions, "tpr", "fpr"))
+```
+
+## Model 2
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+model2 <-  neuralnet(formula = DSTAT ~ ., data =train, hidden=c(5,3), err.fct="ce", stepmax = 1e+06, learningrate = 0.001, algorithm = "backprop", linear.output = FALSE, rep = 10, threshold = 0.1)
+plot(model2, rep="best")
+```
+
+### Training Evaluation
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+model2_predictions<-neuralnet::compute(model2, model2$covariate)$net.result 
+# round to the classes
+model2_predictions<-apply(model2_predictions, c(1), round) 
+# Create the confusion matrix
+x <- table(model2_predictions, train$DSTAT, dnn =c("Predicted", "Actual")) 
+TP <- tryCatch({ TP <- x[1,1]}, error=function(cond){return(0)})
+TN <- tryCatch({ TN <- x[2,2]}, error=function(cond){return(0)})
+FP <- tryCatch({ FP <- x[1,2]}, error=function(cond){return(0)})
+FN <- tryCatch({ FN <- x[2,1]}, error=function(cond){return(0)})
+```
+
+|                          | Train Alive | Train Dead     |
+  |         :----:           |  :----:    |   :----:       |
+  | __Classified Alive__      |`r TP`      | `r FP`         |
+  | __Classified Dead__      |`r FN`      | `r TN`         |
+  
+  The second model achieved an accuracy of __`r (TP + TN) / (TP + TN +FP +FN) * 100`%__ Against the training set. Additionally, the model exhibited a false positive rate of __`r FP/(FP + TN) * 100`__%.
+
+### Testing Evaluation
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+model2_predictions<-neuralnet::compute(model2, test[, -7])$net.result 
+# round to the classes
+model2_predictions<-apply(model2_predictions, c(1), round) 
+# Create the confusion matrix
+x <- table(model2_predictions, test$DSTAT, dnn =c("Predicted", "Actual")) 
+TP <- tryCatch({ TP <- x[1,1]}, error=function(cond){return(0)})
+TN <- tryCatch({ TN <- x[2,2]}, error=function(cond){return(0)})
+FP <- tryCatch({ FP <- x[1,2]}, error=function(cond){return(0)})
+FN <- tryCatch({ FN <- x[2,1]}, error=function(cond){return(0)})
+```
+
+|                          | Test Alive | Test Dead     |
+  |         :----:           |  :----:    |   :----:       |
+  | __Classified Alive__      |`r TP`      | `r FP`         |
+  | __Classified Dead__      |`r FN`      | `r TN`         |
+  
+  The second model achieved an accuracy of __`r (TP + TN) / (TP + TN +FP +FN) * 100`%__ Against the testing set. Additionally, the model exhibited a false positive rate of __`r FP/(FP + TN) * 100`__%.
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+predictions = prediction(model2_predictions, test$DSTAT)
+plot(performance(predictions, "tpr", "fpr"))
+```
+
+## Model 3
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+model3 <-  neuralnet(formula = DSTAT ~ ., data =train, hidden=c(3,5,3), err.fct="ce", stepmax = 1e+06, learningrate = 0.001, algorithm = "backprop", linear.output = FALSE, rep = 10, threshold = 0.3)
+plot(model3, rep="best")
+```
+
+### Training Evaluation
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+model3_predictions<-neuralnet::compute(model3, model3$covariate)$net.result 
+# round to the classes
+model3_predictions<-apply(model3_predictions, c(1), round) 
+# Create the confusion matrix
+x <- table(model3_predictions, train$DSTAT, dnn =c("Predicted", "Actual")) 
+TP <- tryCatch({ TP <- x[1,1]}, error=function(cond){return(0)})
+TN <- tryCatch({ TN <- x[2,2]}, error=function(cond){return(0)})
+FP <- tryCatch({ FP <- x[1,2]}, error=function(cond){return(0)})
+FN <- tryCatch({ FN <- x[2,1]}, error=function(cond){return(0)})
+```
+
+|                          | Train Alive | Train Dead     |
+  |         :----:           |  :----:    |   :----:       |
+  | __Classified Alive__      |`r TP`      | `r FP`         |
+  | __Classified Dead__      |`r FN`      | `r TN`         |
+  
+  The third model achieved an accuracy of __`r (TP + TN) / (TP + TN +FP +FN) * 100`%__ Against the training set. Additionally, the model exhibited a false positive rate of __`r FP/(FP + TN) * 100`__%.
+
+
+### Testing Evaluation
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+model3_predictions<-neuralnet::compute(model3, test[, -7])$net.result 
+# round to the classes
+model3_predictions<-apply(model3_predictions, c(1), round) 
+# Create the confusion matrix
+x <- table(model3_predictions, test$DSTAT, dnn =c("Predicted", "Actual")) 
+TP <- tryCatch({ TP <- x[1,1]}, error=function(cond){return(0)})
+TN <- tryCatch({ TN <- x[2,2]}, error=function(cond){return(0)})
+FP <- tryCatch({ FP <- x[1,2]}, error=function(cond){return(0)})
+FN <- tryCatch({ FN <- x[2,1]}, error=function(cond){return(0)})
+```
+
+|                          | Test Alive | Test Dead     |
+  |         :----:           |  :----:    |   :----:       |
+  | __Classified Alive__      |`r TP`      | `r FP`         |
+  | __Classified Dead__      |`r FN`      | `r TN`         |
+  
+  The third model achieved an accuracy of __`r (TP + TN) / (TP + TN +FP +FN) * 100`%__ Against the testing set. Additionally, the model exhibited a false positive rate of __`r FP/(FP + TN) * 100`__%.
+
+```{r,  out.width = '100%', warning=FALSE, collapse=TRUE}
+predictions = prediction(model3_predictions, test$DSTAT)
+plot(performance(predictions, "tpr", "fpr"))
+```
+
+# References
+
+Hosmer D. W., & Lemeshow, S. (1998). _Heart Disease Survival_[CSV]. Retrieved from https://learn.umgc.edu/d2l/le/content/685926/viewContent/26235200/View
